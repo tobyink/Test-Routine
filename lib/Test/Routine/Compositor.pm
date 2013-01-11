@@ -4,8 +4,8 @@ package Test::Routine::Compositor;
 # ABSTRACT: the tool for turning test routines into runnable classes
 
 use Carp qw(confess);
-use Class::MOP;
-use Moose::Meta::Class;
+use Class::Load qw(load_class);
+use Moo::Role ();
 use Params::Util qw(_CLASS);
 use Scalar::Util qw(blessed);
 
@@ -36,24 +36,56 @@ sub _class_for {
   my @roles;
 
   for my $item (@$inv) {
-    Class::MOP::load_class($item);
-    my $target = $item->meta->isa('Moose::Meta::Class') ? \@bases
-               : $item->meta->isa('Moose::Meta::Role')  ? \@roles
+    load_class($item);
+    my $target = $class->_is_class($item) ? \@bases
+               : $class->_is_role($item)  ? \@roles
                : confess "can't run tests for this weird thing: $item";
 
     push @$target, $item;
   }
 
   confess "can't build a test class from multiple base classes" if @bases > 1;
-  @bases = 'Moose::Object' unless @bases;
+  @bases = 'Moo::Object' unless @bases;
 
-  my $new_class = Moose::Meta::Class->create_anon_class(
+  my $new_class = $class->_create_anon_class(
     superclasses => \@bases,
     cache        => 1,
     (@roles ? (roles => \@roles) : ()),
   );
 
-  return $new_class->name;
+  return $new_class;
+}
+
+sub _is_class {
+  my $item = $_[1];
+  return 1 if $item->can('new');
+  return 1 if $INC{'Class/MOP.pm'} && Class::MOP::class_of($item)->isa('Class::MOP::Class');
+  return;
+}
+
+sub _is_role {
+  my $item = $_[1];
+  return 1 if ref $Role::Tiny::INFO{$item};
+  return 1 if $INC{'Class/MOP.pm'} && Class::MOP::class_of($item)->isa('Moose::Meta::Role');
+  return;
+}
+
+{
+  my ($anon, %cache);
+  sub _create_anon_class {
+    my ($me, %args) = @_;
+    
+    my @isa  = @{ $args{superclasses} || [] };
+    my @does = @{ $args{roles} || [] };
+    my $key  = sprintf('%s + %s', join(',', @isa), join('|', @does));
+    
+    $cache{$key} ||= do {
+      my $pkg  = sprintf('%s::__ANON__::%04d', $me, ++$anon);
+      { no strict 'refs'; *{"$pkg\::ISA"} = \@isa };
+      Moo::Role::->apply_roles_to_package($pkg, @does);
+      $pkg;
+    };
+  }
 }
 
 sub instance_builder {

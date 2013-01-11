@@ -169,47 +169,39 @@ you're done testing.
 
 =cut
 
-use Moose::Exporter;
-
-use Moose::Role ();
-use Moose::Util ();
+use base 'Moo::Role';
+use Import::Into;
+use Moo::_Utils qw(_install_coderef);
 use Scalar::Util qw(blessed);
+use Sub::Name qw( subname );
 
 use Test::Routine::Common;
 use Test::Routine::Test;
 
-Moose::Exporter->setup_import_methods(
-  with_caller => [ qw(test) ],
-  also        => 'Moose::Role',
-);
+require MooX::late;
 
-sub init_meta {
-  my ($class, %arg) = @_;
-
-  my $meta = Moose::Role->init_meta(%arg);
-  my $role = $arg{for_class};
-  Moose::Util::apply_all_roles($role, 'Test::Routine::Common');
-
-  return $meta;
+sub import {
+  my $me     = shift;
+  my $caller = caller;
+  Moo::Role::->import::into($caller);
+  MooX::late::->import::into($caller);
+  $caller->Moo::Role::_install_tracked(test => sub {
+    unshift @_, $caller;
+    goto \&Test::Routine::test;
+  });
+  Moo::Role::->apply_roles_to_package($caller, 'Test::Routine::Common');
 }
 
 my $i = 0;
+our %TESTS;
 sub test {
   my $caller = shift;
   my $name   = shift;
   my ($arg, $body);
 
-  if (blessed($_[0]) && $_[0]->isa('Class::MOP::Method')) {
-    $arg  = {};
-    $body = shift;
-  } else {
-    $arg  = Params::Util::_HASH0($_[0]) ? { %{shift()} } : {};
-    $body = shift;
-  }
+  $arg  = Params::Util::_HASH0($_[0]) ? { %{shift()} } : {};
+  $body = shift;
 
-  # This could really have been done with a MooseX like InitArgs or Alias in
-  # Test::Routine::Test, but since this is a test library, I'd actually like to
-  # keep prerequisites fairly limited. -- rjbs, 2010-09-28
   if (exists $arg->{desc}) {
     Carp::croak "can't supply both 'desc' and 'description'"
       if exists $arg->{description};
@@ -217,43 +209,29 @@ sub test {
   }
 
   $arg->{description} = $name unless defined $arg->{description};
-  $name =~ s/(?:::|')/_/g;
+  $name =~ s/\W+/_/g;
+  $name = "_$name" unless $name =~ /^[a-z]/i;
 
-  my $class = Moose::Meta::Class->initialize($caller);
+  Carp::croak "can't have two tests with the same name ($name)"
+    if $caller->can($name);
+
+  Carp::croak "can't name a test after a Moo::Object method ($name)"
+    if Moo::Object::->can($name);
+
+  {
+    no strict 'refs';
+    *{"$caller\::$name"} = subname "$caller\::$name", $body;
+  }
 
   my %origin;
   @origin{qw(file line nth)} = ((caller(0))[1,2], $i++);
-
-  my $method;
-  if (blessed($body) && $body->isa('Class::MOP::Method')) {
-    my $method_metaclass = Moose::Util::with_traits(
-      blessed($body), 'Test::Routine::Test::Role'
-    );
-    $method = $method_metaclass->meta->rebless_instance(
-      $body,
-      %$arg,
-      name         => $name,
-      package_name => $caller,
-      _origin      => \%origin,
-    );
-  }
-  else {
-    $method = Test::Routine::Test->wrap(
-      %$arg,
-      name => $name,
-      body => $body,
-      package_name => $caller,
-      _origin      => \%origin,
-    );
-  }
-
-  Carp::croak "can't have two tests with the same name ($name)"
-    if $class->get_method($name);
-
-  Carp::croak "can't name a test after a Moose::Object method ($name)"
-    if Moose::Object->can($name);
-
-  $class->add_method($name => $method);
+  
+  $TESTS{$caller}{$name} = Test::Routine::Test::->new({
+    %$arg,
+    name         => $name,
+    package_name => $caller,
+    _origin      => \%origin,
+  });
 }
 
 1;

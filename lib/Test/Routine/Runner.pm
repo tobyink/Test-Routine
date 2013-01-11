@@ -1,5 +1,6 @@
 package Test::Routine::Runner;
-use Moose;
+use Moo;
+use MooX::late;
 # ABSTRACT: tools for running Test::Routine tests
 
 =head1 OVERVIEW
@@ -15,9 +16,8 @@ interface breakage.
 
 use Carp qw(confess);
 use Scalar::Util qw(reftype);
+use Sub::Quote qw(quote_sub);
 use Test::More ();
-
-use Moose::Util::TypeConstraints;
 
 use namespace::clean;
 
@@ -42,33 +42,38 @@ sub _curry_tester {
 }
 # XXX: THIS CODE ABOVE WILL BE REMOVED VERY SOON -- rjbs, 2010-10-18
 
-subtype 'Test::Routine::_InstanceBuilder', as 'CodeRef';
-subtype 'Test::Routine::_Instance',
-  as 'Object',
-  where { $_->does('Test::Routine::Common') };
-
-coerce 'Test::Routine::_InstanceBuilder',
-  from 'Test::Routine::_Instance',
-  via  { my $instance = $_; sub { $instance } };
+# type constraints and coercions
+use constant {
+  _TC_INSTANCE => quote_sub(q{ my ($x) = @_; die unless Scalar::Util::blessed($x) && $x->does('Test::Routine::Common') }),
+  _IS_INSTANCE => quote_sub(q{ my ($x) = @_; !!         Scalar::Util::blessed($x) && $x->does('Test::Routine::Common') }),
+  _TC_BUILDER  => quote_sub(q{ my ($x) = @_; die unless Scalar::Util::reftype($x) eq 'CODE' }),
+  _IS_BUILDER  => quote_sub(q{ my ($x) = @_;            Scalar::Util::reftype($x) eq 'CODE' }),
+};
+sub _COERCE_BUILDER {
+  my $x = shift;
+  return sub { $x } if _IS_INSTANCE->($x);
+  return $x;
+}
 
 has test_instance => (
-  is   => 'ro',
-  does => 'Test::Routine::Common',
+  is   => 'lazy',
+  isa  => _TC_INSTANCE,
   init_arg   => undef,
-  lazy_build => 1,
 );
 
 has _instance_builder => (
   is  => 'ro',
-  isa => 'Test::Routine::_InstanceBuilder',
-  coerce   => 1,
+  isa => _TC_BUILDER,
+  coerce   => \&_COERCE_BUILDER,
   traits   => [ 'Code' ],
   init_arg => 'instance_from',
   required => 1,
-  handles  => {
-    '_build_test_instance' => 'execute_method',
-  },
 );
+
+sub _build_test_instance {
+  my $self = shift;
+  $self->_instance_builder->(@_);
+}
 
 has description => (
   is  => 'ro',
@@ -87,15 +92,7 @@ sub run {
 
   my $thing = $self->test_instance;
 
-  my @tests = grep { Moose::Util::does_role($_, 'Test::Routine::Test::Role') }
-              $thing->meta->get_all_methods;
-
-  # As a side note, I wonder whether there is any way to format the code below
-  # to not look stupid. -- rjbs, 2010-09-28
-  my @ordered_tests = sort {
-         $a->_origin->{file} cmp $b->_origin->{file}
-      || $a->_origin->{nth}  <=> $b->_origin->{nth}
-  } @tests;
+  my @ordered_tests = $thing->test_routines;
 
   Test::More::subtest($self->description, sub {
     for my $test (@ordered_tests) {
